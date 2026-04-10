@@ -2,7 +2,7 @@
   {
     "name": "Prowlarr Easy",
     "id": "prowlarr-easy",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "type": "torrent",
     "accuracy": "medium",
     "ratio": 0,
@@ -14,7 +14,7 @@
     "options": {
       "endpoint": {
         "type": "string",
-        "description": "Your Prowlarr Torznab endpoint. Example: https://prowlarr.example/api/v1/indexer/all/results/torznab/api",
+        "description": "Your Prowlarr base URL or Torznab endpoint. Examples: http://192.168.x.x:9696, https://prowlarr.example.com, or https://prowlarr.example.com/1/api",
         "default": ""
       },
       "apiKey": {
@@ -36,6 +36,11 @@
         "type": "boolean",
         "description": "Reject single-episode results that do not look like the requested episode number.",
         "default": true
+      },
+      "proxyBaseUrl": {
+        "type": "string",
+        "description": "Optional local proxy helper for HTTP, mixed-content, or local-network issues. Leave empty unless direct requests fail. Example: http://127.0.0.1:8765",
+        "default": ""
       }
     }
   }

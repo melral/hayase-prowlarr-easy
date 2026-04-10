@@ -1,48 +1,117 @@
 # Prowlarr Easy for Hayase
 
-A simpler public-install Hayase extension for people who just want one clean setup:
+A Hayase torrent extension that searches through your own Prowlarr setup instead of scraping sites directly.
 
-- install one public `manifest.json`
-- enter one Prowlarr endpoint
-- enter one Prowlarr API key
-- done
+This version is built for normal installs:
 
-This repo intentionally avoids per-site scraping and instead uses your own Prowlarr Torznab endpoint.
+- one public `manifest.json`
+- one Prowlarr URL
+- one Prowlarr API key
+- optional local proxy helper if Hayase cannot reach your local HTTP server directly
+
+## What You Need
+
+- a working Prowlarr instance
+- at least one enabled torrent indexer in Prowlarr
+- your Prowlarr API key
+- Hayase
 
 ## Install URL
 
-Add this repository URL in Hayase:
+Add this repository in Hayase:
 
 ```text
 https://cdn.jsdelivr.net/gh/melral/hayase-prowlarr-easy@main/manifest.json
 ```
 
-In Hayase:
+## Hayase Setup
 
 1. Open `Settings`
 2. Open `Extensions`
 3. Open `Repositories`
-4. Add the manifest URL above
+4. Add the install URL above
 5. Install `Prowlarr Easy`
 6. Open the extension settings
 7. Fill in:
    - `endpoint`
    - `apiKey`
    - optional `categories`
+   - optional `proxyBaseUrl`
 
-## Example Endpoint
+## Endpoint Formats
+
+`endpoint` accepts any of these:
 
 ```text
-https://prowlarr.example/api/v1/indexer/all/results/torznab/api
+http://192.168.x.x:9696
+https://prowlarr.example.com
+https://prowlarr.example.com/prowlarr
+https://prowlarr.example.com/1/api
+https://prowlarr.example.com/api/v1/indexer/all/results/torznab/api
 ```
 
-## Why this version exists
+If you enter the base Prowlarr URL, the extension will automatically discover your enabled torrent indexers and search across them.
 
-The other repo is more flexible and aimed at advanced users with multiple endpoints.
-This one is aimed at normal users who want the easiest legit setup with the least friction.
+## Recommended Settings
 
-## Notes
+For a normal home setup:
 
-- default category `5070` is the common Torznab anime category
-- the extension prefers identifier searches when TVDB, IMDb, or TMDB IDs are available
-- results without a stable torrent hash are skipped because Hayase expects a stable hash
+```text
+endpoint: http://192.168.x.x:9696
+apiKey: your Prowlarr API key
+categories: 5070
+proxyBaseUrl:
+```
+
+## Optional Local Proxy Helper
+
+Some Hayase environments cannot fetch a local HTTP Prowlarr server directly from a secure app/webview.
+If search fails with a generic fetch/network error, run the helper in this repo and set `proxyBaseUrl`.
+
+### Start The Helper
+
+```bash
+python3 serve.py
+```
+
+That starts a local helper on:
+
+```text
+http://127.0.0.1:8765
+```
+
+Then set this in Hayase:
+
+```text
+proxyBaseUrl: http://127.0.0.1:8765
+```
+
+### When You Need It
+
+Use the helper only if:
+
+- Hayase says `Failed to fetch`
+- Hayase can load the extension but cannot reach your local Prowlarr
+- your Prowlarr is only available over plain `http://` on your LAN
+
+If direct access already works, leave `proxyBaseUrl` empty.
+
+## How Search Works
+
+- prefers identifier searches when TVDB, IMDb, or TMDB IDs are available
+- falls back to title searches
+- can search multiple enabled Prowlarr torrent indexers automatically
+- skips results without a stable torrent hash
+- defaults to category `5070`, the common Torznab anime category
+
+## Security Notes
+
+- do not commit or publish your real API key
+- prefer a LAN IP or HTTPS reverse proxy instead of exposing Prowlarr openly to the internet
+- if you accidentally shared your API key, regenerate it in Prowlarr
+
+## Files
+
+- [manifest.json](./manifest.json): Hayase extension manifest
+- [dist/prowlarr.js](./dist/prowlarr.js): extension code
+- [serve.py](./serve.py): optional local proxy helper

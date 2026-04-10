@@ -4,6 +4,7 @@ const DEFAULT_OPTIONS = {
   categories: '5070',
   maxResults: 50,
   strictEpisodeMatching: true,
+  proxyBaseUrl: '',
 };
 
 const REQUEST_TIMEOUT_MS = 8000;
@@ -29,8 +30,11 @@ function normalizeOptions(rawOptions = {}) {
     apiKey: String(rawOptions.apiKey ?? DEFAULT_OPTIONS.apiKey).trim(),
     categories: normalizeCategories(rawOptions.categories ?? DEFAULT_OPTIONS.categories),
     maxResults: clampNumber(rawOptions.maxResults, 1, 100, DEFAULT_OPTIONS.maxResults),
-    strictEpisodeMatching:
-      rawOptions.strictEpisodeMatching ?? DEFAULT_OPTIONS.strictEpisodeMatching,
+    strictEpisodeMatching: normalizeBoolean(
+      rawOptions.strictEpisodeMatching,
+      DEFAULT_OPTIONS.strictEpisodeMatching,
+    ),
+    proxyBaseUrl: normalizeProxyBaseUrl(rawOptions.proxyBaseUrl ?? DEFAULT_OPTIONS.proxyBaseUrl),
   };
 }
 
@@ -44,6 +48,42 @@ function normalizeCategories(rawValue) {
     .split(',')
     .map((entry) => entry.trim())
     .filter(Boolean);
+}
+
+function normalizeProxyBaseUrl(rawValue) {
+  const value = String(rawValue ?? '').trim();
+  if (!value) {
+    return '';
+  }
+
+  try {
+    return new URL(value).toString().replace(/\/+$/, '');
+  } catch {
+    return value.replace(/\/+$/, '');
+  }
+}
+
+function trimTrailingSlashes(value) {
+  return String(value ?? '').replace(/\/+$/, '');
+}
+
+function normalizeBoolean(value, fallback) {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true') {
+      return true;
+    }
+
+    if (normalized === 'false') {
+      return false;
+    }
+  }
+
+  return value == null ? fallback : Boolean(value);
 }
 
 function clampNumber(value, min, max, fallback) {
@@ -69,6 +109,14 @@ function ensureConfigured(options) {
   } catch {
     throw new Error('The configured endpoint is not a valid URL.');
   }
+
+  if (options.proxyBaseUrl) {
+    try {
+      new URL(options.proxyBaseUrl);
+    } catch {
+      throw new Error('The configured proxy helper URL is not a valid URL.');
+    }
+  }
 }
 
 function buildSearchUrl(options, searchType, params = {}) {
@@ -93,7 +141,90 @@ function buildSearchUrl(options, searchType, params = {}) {
   return url.toString();
 }
 
-async function requestText(url, fetchImpl, timeoutMs = REQUEST_TIMEOUT_MS) {
+function normalizePathname(pathname) {
+  return pathname.replace(/\/+$/, '') || '/';
+}
+
+function joinBaseUrl(baseUrl, path) {
+  return `${trimTrailingSlashes(baseUrl)}${path}`;
+}
+
+function parseProwlarrEndpoint(endpoint) {
+  try {
+    const url = new URL(endpoint);
+    const pathname = normalizePathname(url.pathname);
+
+    const directMatch = pathname.match(/^(.*)\/(\d+)\/api$/);
+    if (directMatch) {
+      return {
+        mode: 'direct',
+        baseUrl: `${url.origin}${trimTrailingSlashes(directMatch[1])}`,
+        indexerId: directMatch[2],
+      };
+    }
+
+    const legacyMatch = pathname.match(
+      /^(.*)\/api\/v1\/indexer\/(?:(all)|(\d+))\/results\/torznab(?:\/api)?$/,
+    );
+    if (legacyMatch) {
+      return {
+        mode: legacyMatch[2] ? 'all' : 'single',
+        baseUrl: `${url.origin}${trimTrailingSlashes(legacyMatch[1])}`,
+        indexerId: legacyMatch[3] ?? null,
+      };
+    }
+
+    if (pathname === '/') {
+      return { mode: 'all', baseUrl: url.origin, indexerId: null };
+    }
+
+    if (/\/api$/.test(pathname) && !/\/api\/v1\//.test(pathname)) {
+      return {
+        mode: 'all',
+        baseUrl: `${url.origin}${trimTrailingSlashes(pathname.replace(/\/api$/, ''))}`,
+        indexerId: null,
+      };
+    }
+
+    if (!/\/api\b/.test(pathname)) {
+      return {
+        mode: 'all',
+        baseUrl: `${url.origin}${trimTrailingSlashes(pathname)}`,
+        indexerId: null,
+      };
+    }
+
+    return { mode: 'custom', baseUrl: url.origin, indexerId: null };
+  } catch {
+    return { mode: 'custom', baseUrl: '', indexerId: null };
+  }
+}
+
+function buildRequestUrl(url, proxyBaseUrl) {
+  if (!proxyBaseUrl) {
+    return url;
+  }
+
+  try {
+    const parsed = new URL(url);
+    const proxy = new URL(proxyBaseUrl);
+
+    if (
+      parsed.origin === proxy.origin ||
+      parsed.protocol === 'https:' ||
+      parsed.hostname === '127.0.0.1' ||
+      parsed.hostname === 'localhost'
+    ) {
+      return url;
+    }
+
+    return `${trimTrailingSlashes(proxyBaseUrl)}/proxy?url=${encodeURIComponent(url)}`;
+  } catch {
+    return url;
+  }
+}
+
+async function requestText(url, fetchImpl, timeoutMs = REQUEST_TIMEOUT_MS, proxyBaseUrl = '') {
   if (typeof fetchImpl !== 'function') {
     throw new Error('Fetch is not available in this Hayase extension environment.');
   }
@@ -107,9 +238,10 @@ async function requestText(url, fetchImpl, timeoutMs = REQUEST_TIMEOUT_MS) {
       : null;
 
   let response;
+  const requestUrl = buildRequestUrl(url, proxyBaseUrl);
 
   try {
-    response = await fetchImpl(url, {
+    response = await fetchImpl(requestUrl, {
       headers: {
         Accept: 'application/xml,text/xml,application/rss+xml,text/plain;q=0.9,*/*;q=0.8',
       },
@@ -153,6 +285,47 @@ async function requestText(url, fetchImpl, timeoutMs = REQUEST_TIMEOUT_MS) {
   }
 
   return text;
+}
+
+async function requestJson(url, fetchImpl, timeoutMs = REQUEST_TIMEOUT_MS, proxyBaseUrl = '') {
+  const text = await requestText(url, fetchImpl, timeoutMs, proxyBaseUrl);
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error('Prowlarr returned invalid JSON while loading enabled indexers.');
+  }
+}
+
+async function resolveSearchEndpoints(options, fetchImpl) {
+  const parsed = parseProwlarrEndpoint(options.endpoint);
+
+  if (parsed.mode === 'direct' || parsed.mode === 'custom') {
+    return [options.endpoint];
+  }
+
+  if (parsed.mode === 'single' && parsed.indexerId) {
+    return [joinBaseUrl(parsed.baseUrl, `/${parsed.indexerId}/api`)];
+  }
+
+  const apiUrl = joinBaseUrl(
+    parsed.baseUrl,
+    `/api/v1/indexer?apikey=${encodeURIComponent(options.apiKey)}`,
+  );
+  const indexers = await requestJson(apiUrl, fetchImpl, REQUEST_TIMEOUT_MS, options.proxyBaseUrl);
+
+  const endpoints = (Array.isArray(indexers) ? indexers : [])
+    .filter((indexer) => indexer?.enable !== false)
+    .filter((indexer) => indexer?.protocol === 'torrent')
+    .filter((indexer) => indexer?.supportsSearch !== false)
+    .sort((left, right) => (right?.priority ?? 0) - (left?.priority ?? 0))
+    .map((indexer) => joinBaseUrl(parsed.baseUrl, `/${indexer.id}/api`));
+
+  if (endpoints.length === 0) {
+    throw new Error('No enabled searchable torrent indexers were found in Prowlarr.');
+  }
+
+  return endpoints;
 }
 
 function buildSearchPlans(kind, query) {
@@ -265,6 +438,7 @@ async function search(kind, query, rawOptions = {}) {
   ensureConfigured(options);
 
   const fetchImpl = query?.fetch ?? globalThis.fetch;
+  const searchEndpoints = await resolveSearchEndpoints(options, fetchImpl);
   const plans = buildSearchPlans(kind, query);
 
   if (plans.length === 0) {
@@ -275,32 +449,41 @@ async function search(kind, query, rawOptions = {}) {
   let completedRequests = 0;
   let lastError = null;
 
-  for (const plan of plans) {
-    try {
-      const xml = await requestText(
-        buildSearchUrl(options, plan.searchType, plan.params),
-        fetchImpl,
-        REQUEST_TIMEOUT_MS,
-      );
-      completedRequests += 1;
+  for (const endpoint of searchEndpoints) {
+    const endpointOptions = { ...options, endpoint };
 
-      for (const itemXml of parseItems(xml)) {
-        const parsed = parseResultItem(itemXml, kind, plan, query, options);
-        if (!parsed) {
-          continue;
+    for (const plan of plans) {
+      try {
+        const xml = await requestText(
+          buildSearchUrl(endpointOptions, plan.searchType, plan.params),
+          fetchImpl,
+          REQUEST_TIMEOUT_MS,
+          options.proxyBaseUrl,
+        );
+        completedRequests += 1;
+
+        for (const itemXml of parseItems(xml)) {
+          const parsed = parseResultItem(itemXml, kind, plan, query, options);
+          if (!parsed) {
+            continue;
+          }
+
+          const existing = deduped.get(parsed.hash);
+          if (!existing || parsed._score > existing._score) {
+            deduped.set(parsed.hash, parsed);
+          }
         }
 
-        const existing = deduped.get(parsed.hash);
-        if (!existing || parsed._score > existing._score) {
-          deduped.set(parsed.hash, parsed);
+        if (deduped.size >= options.maxResults) {
+          break;
         }
+      } catch (error) {
+        lastError = error;
       }
+    }
 
-      if (deduped.size >= options.maxResults) {
-        break;
-      }
-    } catch (error) {
-      lastError = error;
+    if (deduped.size >= options.maxResults) {
+      break;
     }
   }
 
@@ -709,10 +892,20 @@ function parseDate(value) {
 }
 
 async function test(options = {}) {
+  if (!options || Object.keys(options).length === 0) {
+    return true;
+  }
+
   const config = normalizeOptions(options);
   ensureConfigured(config);
+  const searchEndpoints = await resolveSearchEndpoints(config, globalThis.fetch);
 
-  const xml = await requestText(buildSearchUrl(config, 'caps'), globalThis.fetch, 5000);
+  const xml = await requestText(
+    buildSearchUrl({ ...config, endpoint: searchEndpoints[0] }, 'caps'),
+    globalThis.fetch,
+    5000,
+    config.proxyBaseUrl,
+  );
 
   if (!/<(?:caps|rss)\b/i.test(xml)) {
     throw new Error('The endpoint responded, but not with Torznab-compatible XML.');
