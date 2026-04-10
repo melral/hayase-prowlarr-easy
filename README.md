@@ -130,6 +130,7 @@ If direct access already works, leave `proxyBaseUrl` empty.
 - caches discovered indexers for faster repeated searches
 - searches indexers in parallel per search plan instead of fully serializing everything
 - drops timed-out endpoints for the rest of the current search
+- rejects mismatched episode numbers more aggressively so episode 1 does not accidentally resolve to episode 2
 - skips results without a stable torrent hash
 - defaults to category `5070`, the common Torznab anime category
 - defaults to `maxResults: 10` for better latency in Hayase

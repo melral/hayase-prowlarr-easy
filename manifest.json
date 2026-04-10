@@ -2,7 +2,7 @@
   {
     "name": "Prowlarr Easy",
     "id": "prowlarr-easy",
-    "version": "1.2.0",
+    "version": "1.2.1",
     "type": "torrent",
     "accuracy": "medium",
     "ratio": 0,
