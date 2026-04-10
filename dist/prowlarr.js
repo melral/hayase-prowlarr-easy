@@ -517,17 +517,62 @@ function getRequestedEpisodeNumbers(query) {
   return values;
 }
 
-function recordEpisodeCandidate(candidates, rawValue, score) {
-  const numeric = Number(rawValue);
+function normalizeEpisodeNumber(value) {
+  const numeric = Number(value);
   if (!Number.isFinite(numeric) || numeric < 1 || numeric > 9999) {
-    return;
+    return null;
   }
 
   if (COMMON_VIDEO_NUMBERS.has(numeric)) {
+    return null;
+  }
+
+  return numeric;
+}
+
+function recordEpisodeCandidate(candidates, rawValue, score) {
+  const numeric = normalizeEpisodeNumber(rawValue);
+  if (numeric == null) {
     return;
   }
 
   candidates.set(numeric, Math.max(score, candidates.get(numeric) ?? 0));
+}
+
+function extractEpisodeRanges(title) {
+  const rawTitle = String(title ?? '');
+  const ranges = [];
+  const seen = new Set();
+  const patterns = [
+    /\b(?:episode|episodes|ep)\s*0*(\d{1,4})(?:v\d+)?\s*(?:-|~|to|through|thru|&|\+)\s*(?:episode|episodes|ep)?\s*0*(\d{1,4})(?:v\d+)?\b/gi,
+    /\bS\d{1,2}E0*(\d{1,4})(?:v\d+)?\s*(?:-|~|to|through|thru|&|\+)\s*(?:E)?0*(\d{1,4})(?:v\d+)?\b/gi,
+    /(?:^|[\[(\s])0*(\d{1,4})(?:v\d+)?\s*(?:-|~|to|through|thru|&|\+)\s*0*(\d{1,4})(?:v\d+)?(?=$|[\])\s])/gi,
+  ];
+
+  for (const pattern of patterns) {
+    for (const match of rawTitle.matchAll(pattern)) {
+      const start = normalizeEpisodeNumber(match[1]);
+      const end = normalizeEpisodeNumber(match[2]);
+
+      if (start == null || end == null || end < start || end === start) {
+        continue;
+      }
+
+      if (start >= 1900 && end <= 12) {
+        continue;
+      }
+
+      const key = `${start}-${end}`;
+      if (seen.has(key)) {
+        continue;
+      }
+
+      seen.add(key);
+      ranges.push({ start, end });
+    }
+  }
+
+  return ranges;
 }
 
 function extractEpisodeCandidates(title) {
@@ -840,8 +885,14 @@ function scoreResultTitle(title, normalizedTitle, kind, plan, query, options) {
   const requestedEpisodes = kind === 'single' ? getRequestedEpisodeNumbers(query) : [];
 
   if (kind === 'single' && requestedEpisodes.length > 0) {
+    const episodeRanges = extractEpisodeRanges(title);
+    const spansMultipleEpisodes = episodeRanges.some(({ start, end }) => end > start);
     const hasEpisode = matchesEpisodeNumber(title, normalizedTitle, requestedEpisodes);
-    const looksBatch = looksLikeBatch(normalizedTitle, query.episodeCount);
+    const looksBatch = looksLikeBatch(title, normalizedTitle, query.episodeCount);
+
+    if ((looksBatch || spansMultipleEpisodes) && options.strictEpisodeMatching) {
+      return { rejected: true };
+    }
 
     if (hasEpisode) {
       score += 25;
@@ -853,7 +904,7 @@ function scoreResultTitle(title, normalizedTitle, kind, plan, query, options) {
   }
 
   if (kind === 'batch') {
-    if (looksLikeBatch(normalizedTitle, query.episodeCount)) {
+    if (looksLikeBatch(title, normalizedTitle, query.episodeCount)) {
       score += 25;
       resultType = 'batch';
     } else {
@@ -921,16 +972,19 @@ function computeTitleSimilarity(normalizedResultTitle, titles) {
   return best;
 }
 
-function looksLikeBatch(normalizedTitle, episodeCount) {
+function looksLikeBatch(title, normalizedTitle, episodeCount) {
   if (BATCH_MARKERS.some((marker) => normalizedTitle.includes(marker))) {
     return true;
   }
 
-  if (/\b(?:s\d{1,2}|season\s+\d{1,2})\b/i.test(normalizedTitle)) {
+  if (
+    /\b(?:s\d{1,2}|season\s+\d{1,2})\b/i.test(normalizedTitle) &&
+    /\b(?:complete|pack|collection|batch)\b/i.test(normalizedTitle)
+  ) {
     return true;
   }
 
-  if (/\b\d{1,3}\s*-\s*\d{1,3}\b/.test(normalizedTitle)) {
+  if (extractEpisodeRanges(title).length > 0) {
     return true;
   }
 

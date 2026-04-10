@@ -2,7 +2,7 @@
   {
     "name": "Prowlarr Easy",
     "id": "prowlarr-easy",
-    "version": "1.2.2",
+    "version": "1.2.3",
     "type": "torrent",
     "accuracy": "medium",
     "ratio": 0,
@@ -34,7 +34,7 @@
       },
       "strictEpisodeMatching": {
         "type": "boolean",
-        "description": "Reject single-episode results that do not look like the requested episode number.",
+        "description": "Reject single-episode results that do not look like the requested episode number, including obvious batch, range, or season-pack releases.",
         "default": true
       },
       "proxyBaseUrl": {
