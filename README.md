@@ -35,6 +35,7 @@ https://cdn.jsdelivr.net/gh/melral/hayase-prowlarr-easy@main/manifest.json
 7. Fill in:
    - `endpoint`
    - `apiKey`
+   - optional `maxResults`
    - optional `categories`
    - optional `proxyBaseUrl`
 
@@ -52,6 +53,14 @@ https://prowlarr.example.com/api/v1/indexer/all/results/torznab/api
 
 If you enter the base Prowlarr URL, the extension will automatically discover your enabled torrent indexers and search across them.
 
+If you want the fastest possible setup, use a direct indexer endpoint such as:
+
+```text
+http://192.168.x.x:9696/1/api
+```
+
+That skips indexer discovery and only searches that one Prowlarr indexer.
+
 ## Recommended Settings
 
 For a normal home setup:
@@ -59,9 +68,26 @@ For a normal home setup:
 ```text
 endpoint: http://192.168.x.x:9696
 apiKey: your Prowlarr API key
+maxResults: 10
 categories: 5070
 proxyBaseUrl:
 ```
+
+## Connection Check
+
+The extension's test flow now verifies:
+
+- your URL is valid
+- your API key is accepted
+- Prowlarr exposes at least one enabled searchable torrent indexer
+- at least one Torznab `caps` endpoint really responds
+
+If the status test fails, the error should now be much more specific:
+
+- invalid API key
+- wrong endpoint path
+- search timeout
+- missing enabled torrent indexers
 
 ## Optional Local Proxy Helper
 
@@ -101,8 +127,12 @@ If direct access already works, leave `proxyBaseUrl` empty.
 - prefers identifier searches when TVDB, IMDb, or TMDB IDs are available
 - falls back to title searches
 - can search multiple enabled Prowlarr torrent indexers automatically
+- caches discovered indexers for faster repeated searches
+- searches indexers in parallel per search plan instead of fully serializing everything
+- drops timed-out endpoints for the rest of the current search
 - skips results without a stable torrent hash
 - defaults to category `5070`, the common Torznab anime category
+- defaults to `maxResults: 10` for better latency in Hayase
 
 ## Security Notes
 

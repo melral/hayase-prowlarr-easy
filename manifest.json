@@ -2,7 +2,7 @@
   {
     "name": "Prowlarr Easy",
     "id": "prowlarr-easy",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "type": "torrent",
     "accuracy": "medium",
     "ratio": 0,
@@ -14,7 +14,7 @@
     "options": {
       "endpoint": {
         "type": "string",
-        "description": "Your Prowlarr base URL or Torznab endpoint. Examples: http://192.168.x.x:9696, https://prowlarr.example.com, or https://prowlarr.example.com/1/api",
+        "description": "Your Prowlarr base URL or Torznab endpoint. Recommended: use the base URL. Fastest advanced option: a direct /<indexer-id>/api endpoint.",
         "default": ""
       },
       "apiKey": {
@@ -29,8 +29,8 @@
       },
       "maxResults": {
         "type": "number",
-        "description": "Maximum number of results fetched per search.",
-        "default": 50
+        "description": "Maximum number of results returned per search. Lower values are faster. Default 10 is recommended.",
+        "default": 10
       },
       "strictEpisodeMatching": {
         "type": "boolean",

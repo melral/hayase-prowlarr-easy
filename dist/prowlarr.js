@@ -2,12 +2,17 @@ const DEFAULT_OPTIONS = {
   endpoint: '',
   apiKey: '',
   categories: '5070',
-  maxResults: 50,
+  maxResults: 10,
   strictEpisodeMatching: true,
   proxyBaseUrl: '',
 };
 
-const REQUEST_TIMEOUT_MS = 8000;
+const REQUEST_TIMEOUT_MS = 5000;
+const CONNECTIVITY_TIMEOUT_MS = 4000;
+const SEARCH_ENDPOINT_CACHE_TTL_MS = 5 * 60 * 1000;
+const MAX_TITLE_VARIANTS = 3;
+const MAX_SEARCH_PLANS = 8;
+const MAX_CONNECTIVITY_PROBES = 3;
 const BATCH_MARKERS = [
   'batch',
   'complete',
@@ -23,6 +28,7 @@ const DUB_PATTERNS = [
 ];
 const SUB_PATTERNS = [/\b(?:sub|subbed|multi-sub|english sub)\b/i];
 const STOP_WORDS = new Set(['the', 'a', 'an', 'of', 'and', 'season', 'part', 'movie']);
+const searchEndpointCache = new Map();
 
 function normalizeOptions(rawOptions = {}) {
   return {
@@ -65,6 +71,42 @@ function normalizeProxyBaseUrl(rawValue) {
 
 function trimTrailingSlashes(value) {
   return String(value ?? '').replace(/\/+$/, '');
+}
+
+function getSearchEndpointCacheKey(options) {
+  return JSON.stringify({
+    endpoint: trimTrailingSlashes(options.endpoint),
+    apiKey: options.apiKey,
+    proxyBaseUrl: trimTrailingSlashes(options.proxyBaseUrl),
+  });
+}
+
+function getCachedSearchEndpoints(options) {
+  const key = getSearchEndpointCacheKey(options);
+  const cached = searchEndpointCache.get(key);
+
+  if (!cached) {
+    return null;
+  }
+
+  if (cached.expiresAt <= Date.now()) {
+    searchEndpointCache.delete(key);
+    return null;
+  }
+
+  return [...cached.endpoints];
+}
+
+function setCachedSearchEndpoints(options, endpoints) {
+  const key = getSearchEndpointCacheKey(options);
+  searchEndpointCache.set(key, {
+    endpoints: [...endpoints],
+    expiresAt: Date.now() + SEARCH_ENDPOINT_CACHE_TTL_MS,
+  });
+}
+
+function clearCachedSearchEndpoints(options) {
+  searchEndpointCache.delete(getSearchEndpointCacheKey(options));
 }
 
 function normalizeBoolean(value, fallback) {
@@ -297,7 +339,14 @@ async function requestJson(url, fetchImpl, timeoutMs = REQUEST_TIMEOUT_MS, proxy
   }
 }
 
-async function resolveSearchEndpoints(options, fetchImpl) {
+async function resolveSearchEndpoints(options, fetchImpl, forceRefresh = false) {
+  if (!forceRefresh) {
+    const cached = getCachedSearchEndpoints(options);
+    if (cached) {
+      return cached;
+    }
+  }
+
   const parsed = parseProwlarrEndpoint(options.endpoint);
 
   if (parsed.mode === 'direct' || parsed.mode === 'custom') {
@@ -325,13 +374,14 @@ async function resolveSearchEndpoints(options, fetchImpl) {
     throw new Error('No enabled searchable torrent indexers were found in Prowlarr.');
   }
 
+  setCachedSearchEndpoints(options, endpoints);
   return endpoints;
 }
 
 function buildSearchPlans(kind, query) {
   const plans = [];
   const seen = new Set();
-  const titleVariants = buildTitleVariants(query).slice(0, 4);
+  const titleVariants = buildTitleVariants(query).slice(0, MAX_TITLE_VARIANTS);
 
   const pushPlan = (searchType, params, strategy) => {
     const key = `${searchType}|${JSON.stringify(params)}`;
@@ -381,7 +431,7 @@ function buildSearchPlans(kind, query) {
     pushPlan('search', { q: title }, 'title');
   }
 
-  return plans.slice(0, 10);
+  return plans.slice(0, MAX_SEARCH_PLANS);
 }
 
 function buildTitleVariants(query) {
@@ -433,6 +483,35 @@ function formatEpisodeToken(episode) {
   return String(number).padStart(2, '0');
 }
 
+function shouldDisableEndpoint(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /did not respond within|Could not reach the Prowlarr endpoint/i.test(message);
+}
+
+function normalizeSearchFailure(error) {
+  const message = error instanceof Error ? error.message : String(error);
+
+  if (/401|unauthorized|api key/i.test(message)) {
+    return new Error(
+      'Prowlarr rejected the API key. Generate a fresh API key in Prowlarr and update the extension settings.',
+    );
+  }
+
+  if (/404|Not Found/i.test(message)) {
+    return new Error(
+      'Prowlarr could not find that endpoint. Use your Prowlarr base URL or a direct /<indexer-id>/api endpoint.',
+    );
+  }
+
+  if (/did not respond within/i.test(message)) {
+    return new Error(
+      'Prowlarr search timed out. Try a direct /<indexer-id>/api endpoint, keep maxResults low, or configure proxyBaseUrl.',
+    );
+  }
+
+  return error instanceof Error ? error : new Error(message);
+}
+
 async function search(kind, query, rawOptions = {}) {
   const options = normalizeOptions(rawOptions);
   ensureConfigured(options);
@@ -446,39 +525,57 @@ async function search(kind, query, rawOptions = {}) {
   }
 
   const deduped = new Map();
+  const disabledEndpoints = new Set();
   let completedRequests = 0;
   let lastError = null;
 
-  for (const endpoint of searchEndpoints) {
-    const endpointOptions = { ...options, endpoint };
+  for (const plan of plans) {
+    const activeEndpoints = searchEndpoints.filter((endpoint) => !disabledEndpoints.has(endpoint));
+    if (activeEndpoints.length === 0) {
+      break;
+    }
 
-    for (const plan of plans) {
-      try {
-        const xml = await requestText(
-          buildSearchUrl(endpointOptions, plan.searchType, plan.params),
-          fetchImpl,
-          REQUEST_TIMEOUT_MS,
-          options.proxyBaseUrl,
-        );
-        completedRequests += 1;
+    const responses = await Promise.all(
+      activeEndpoints.map(async (endpoint) => {
+        const endpointOptions = { ...options, endpoint };
 
-        for (const itemXml of parseItems(xml)) {
-          const parsed = parseResultItem(itemXml, kind, plan, query, options);
-          if (!parsed) {
-            continue;
-          }
+        try {
+          const xml = await requestText(
+            buildSearchUrl(endpointOptions, plan.searchType, plan.params),
+            fetchImpl,
+            REQUEST_TIMEOUT_MS,
+            options.proxyBaseUrl,
+          );
 
-          const existing = deduped.get(parsed.hash);
-          if (!existing || parsed._score > existing._score) {
-            deduped.set(parsed.hash, parsed);
-          }
+          return { endpoint, xml, error: null };
+        } catch (error) {
+          return { endpoint, xml: '', error };
+        }
+      }),
+    );
+
+    for (const response of responses) {
+      if (response.error) {
+        lastError = response.error;
+        if (shouldDisableEndpoint(response.error)) {
+          disabledEndpoints.add(response.endpoint);
         }
 
-        if (deduped.size >= options.maxResults) {
-          break;
+        continue;
+      }
+
+      completedRequests += 1;
+
+      for (const itemXml of parseItems(response.xml)) {
+        const parsed = parseResultItem(itemXml, kind, plan, query, options);
+        if (!parsed) {
+          continue;
         }
-      } catch (error) {
-        lastError = error;
+
+        const existing = deduped.get(parsed.hash);
+        if (!existing || parsed._score > existing._score) {
+          deduped.set(parsed.hash, parsed);
+        }
       }
     }
 
@@ -497,7 +594,8 @@ async function search(kind, query, rawOptions = {}) {
   }
 
   if (completedRequests === 0 && lastError) {
-    throw lastError;
+    clearCachedSearchEndpoints(options);
+    throw normalizeSearchFailure(lastError);
   }
 
   return [];
@@ -898,17 +996,34 @@ async function test(options = {}) {
 
   const config = normalizeOptions(options);
   ensureConfigured(config);
-  const searchEndpoints = await resolveSearchEndpoints(config, globalThis.fetch);
+  const searchEndpoints = await resolveSearchEndpoints(config, globalThis.fetch, true);
+  const probeEndpoints = searchEndpoints.slice(0, MAX_CONNECTIVITY_PROBES);
 
-  const xml = await requestText(
-    buildSearchUrl({ ...config, endpoint: searchEndpoints[0] }, 'caps'),
-    globalThis.fetch,
-    5000,
-    config.proxyBaseUrl,
-  );
+  let lastError = null;
 
-  if (!/<(?:caps|rss)\b/i.test(xml)) {
-    throw new Error('The endpoint responded, but not with Torznab-compatible XML.');
+  for (const endpoint of probeEndpoints) {
+    try {
+      const xml = await requestText(
+        buildSearchUrl({ ...config, endpoint }, 'caps'),
+        globalThis.fetch,
+        CONNECTIVITY_TIMEOUT_MS,
+        config.proxyBaseUrl,
+      );
+
+      if (!/<(?:caps|rss)\b/i.test(xml)) {
+        throw new Error('The endpoint responded, but not with Torznab-compatible XML.');
+      }
+
+      return true;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  clearCachedSearchEndpoints(config);
+
+  if (lastError) {
+    throw normalizeSearchFailure(lastError);
   }
 
   return true;
