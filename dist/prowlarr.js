@@ -487,10 +487,23 @@ function formatEpisodeToken(episode) {
   return String(number).padStart(2, '0');
 }
 
+function hasSeasonContext(query) {
+  return (query.titles ?? []).some((title) =>
+    /\b(?:season\s+\d+|s\d{1,2}|cour\s+\d+|part\s+\d+|\d+(?:st|nd|rd|th)\s+season|final season)\b/i.test(
+      String(title ?? ''),
+    ),
+  );
+}
+
 function getRequestedEpisodeNumbers(query) {
   const values = [];
+  const candidates = [query.episode];
 
-  for (const candidate of [query.episode, query.absoluteEpisodeNumber]) {
+  if (!hasSeasonContext(query)) {
+    candidates.push(query.absoluteEpisodeNumber);
+  }
+
+  for (const candidate of candidates) {
     const numeric = Number(candidate);
     if (!Number.isFinite(numeric) || numeric < 1) {
       continue;
